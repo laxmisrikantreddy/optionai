@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OptionAI · Live Buy Signals</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0; background: #0b0f17; color: #e6edf3; }
+    header { padding: 14px 20px; border-bottom: 1px solid #1f2733;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.2px; }
+    .pill { padding: 4px 10px; border-radius: 999px; font-size: 12px;
+      background: #1f2733; color: #cbd5e1; }
+    .pill.ok { background: #14532d; color: #bbf7d0; }
+    .pill.err { background: #7f1d1d; color: #fecaca; }
+    .muted { color: #94a3b8; font-size: 12px; }
+    main { padding: 14px 20px 60px; }
+    .table-wrap { overflow-x: auto; border: 1px solid #1f2733; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 9px 12px;
+      border-bottom: 1px solid #1f2733; white-space: nowrap; }
+    th { font-weight: 600; color: #94a3b8; background: #0f172a;
+      position: sticky; top: 0; z-index: 1; }
+    tr:hover td { background: #111827; }
+    .ce { color: #4ade80; font-weight: 600; }
+    .pe { color: #f87171; font-weight: 600; }
+    .num { font-variant-numeric: tabular-nums; text-align: right; }
+    .empty { padding: 40px; text-align: center; color: #94a3b8; }
+    .rule { font-size: 11px; padding: 2px 6px; border-radius: 4px;
+      background: #1e293b; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OptionAI · Live Option-Buy Signals</h1>
+    <span id="statusPill" class="pill">connecting…</span>
+    <span id="lastPoll" class="muted"></span>
+    <span id="errPill" class="pill err" style="display:none"></span>
+    <span class="muted" style="margin-left:auto" id="cfgInfo"></span>
+  </header>
+
+  <main>
+    <div class="table-wrap">
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Underlying</th>
+            <th>Side</th>
+            <th class="num">Strike</th>
+            <th>Expiry</th>
+            <th class="num">LTP</th>
+            <th class="num">SL</th>
+            <th class="num">Target</th>
+            <th class="num">Delta</th>
+            <th class="num">IV</th>
+            <th class="num">OI Δ%</th>
+            <th class="num">LTP Δ%</th>
+            <th>Rule</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div id="empty" class="empty">Waiting for signals… the engine polls every few seconds.</div>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

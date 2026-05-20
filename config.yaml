@@ -1,0 +1,35 @@
+# Underlyings to monitor. Dhan v2 underlying codes:
+#   NIFTY 50      -> scrip 13, segment IDX_I
+#   BANKNIFTY     -> scrip 25, segment IDX_I
+#   FINNIFTY      -> scrip 27, segment IDX_I
+#   SENSEX        -> scrip 51, segment IDX_I
+underlyings:
+  - name: NIFTY
+    scrip: 13
+    segment: IDX_I
+  - name: BANKNIFTY
+    scrip: 25
+    segment: IDX_I
+
+# Seconds between polls. Dhan option-chain limit is ~1 req / 3s, so keep >= 5s
+# when monitoring 2 underlyings (each poll = expiry + chain = 2 calls).
+poll_interval_seconds: 5
+
+# Stop-loss and target sizing for option BUYS.
+#   sl_pct = fraction of premium risked (0.30 = 30% of premium = SL)
+#   rr     = risk:reward, target = entry * (1 + sl_pct * rr)
+risk:
+  sl_pct: 0.30
+  rr: 2.0
+
+# Rule thresholds.
+rules:
+  delta_min: 0.35              # only emit signals on strikes with |delta| in this band
+  delta_max: 0.55
+  oi_change_pct_min: 20.0      # min OI %change for LONG_BUILDUP
+  price_change_pct_min: 5.0    # min LTP %change for any rule
+  short_cover_oi_drop_pct: 15.0  # min OI %drop (absolute) for SHORT_COVERING
+
+# Don't re-emit the same (underlying, strike, side, rule) within this window.
+signal_dedup_window_seconds: 300
+max_signals_in_store: 500
