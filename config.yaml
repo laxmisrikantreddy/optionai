@@ -7,9 +7,15 @@ underlyings:
   - name: NIFTY
     scrip: 13
     segment: IDX_I
+    security_id: "13"
+    chart_exchange_segment: IDX_I
+    chart_instrument: INDEX
   - name: BANKNIFTY
     scrip: 25
     segment: IDX_I
+    security_id: "25"
+    chart_exchange_segment: IDX_I
+    chart_instrument: INDEX
 
 # Seconds between poll cycles.
 poll_interval_seconds: 10

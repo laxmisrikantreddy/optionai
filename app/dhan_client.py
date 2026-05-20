@@ -88,3 +88,52 @@ class DhanClient:
             },
         )
         return data.get("data", {}) or {}
+
+    async def intraday_candles(
+        self,
+        security_id: str,
+        exchange_segment: str,
+        instrument: str,
+        from_date: str,
+        to_date: str,
+        interval: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Fetch intraday 1-min (or 5/15/25/60) candles.
+
+        POST /v2/charts/intraday
+        Body: {securityId, exchangeSegment, instrument, interval, oi, fromDate, toDate}
+        Response: {"open":[...], "high":[...], "low":[...], "close":[...],
+                   "volume":[...], "timestamp":[...]}
+
+        Returns list of dicts: [{timestamp, open, high, low, close, volume}, ...]
+        """
+        data = await self._post(
+            "/charts/intraday",
+            {
+                "securityId": security_id,
+                "exchangeSegment": exchange_segment,
+                "instrument": instrument,
+                "interval": interval,
+                "oi": False,
+                "fromDate": from_date,
+                "toDate": to_date,
+            },
+        )
+        # Dhan returns arrays of equal length for each OHLCV field.
+        opens = data.get("open") or []
+        highs = data.get("high") or []
+        lows = data.get("low") or []
+        closes = data.get("close") or []
+        volumes = data.get("volume") or []
+        timestamps = data.get("timestamp") or []
+        candles = []
+        for i in range(len(timestamps)):
+            candles.append({
+                "timestamp": timestamps[i],
+                "open": opens[i] if i < len(opens) else 0,
+                "high": highs[i] if i < len(highs) else 0,
+                "low": lows[i] if i < len(lows) else 0,
+                "close": closes[i] if i < len(closes) else 0,
+                "volume": volumes[i] if i < len(volumes) else 0,
+            })
+        return candles

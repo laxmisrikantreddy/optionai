@@ -16,6 +16,12 @@ class Underlying(BaseModel):
     name: str
     scrip: int
     segment: str
+    # For intraday candle API (ORB backfill). Same as scrip but as string.
+    security_id: str = ""
+    # Exchange segment string for the charts API (e.g. "IDX_I" for indices).
+    chart_exchange_segment: str = "IDX_I"
+    # Instrument type for the charts API.
+    chart_instrument: str = "INDEX"
 
 
 class RiskCfg(BaseModel):

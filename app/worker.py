@@ -39,6 +39,58 @@ class WorkerState:
 state = WorkerState()
 
 
+async def _backfill_orb(dhan: DhanClient) -> None:
+    """Fetch today's early-morning 1-min candles and seed SpotHistory.
+
+    This gives us VWAP / ORB / momentum even when the app starts mid-day.
+    If today's data isn't available (pre-market, holiday), it's a no-op.
+    """
+    now_ist = datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    for u in settings.underlyings:
+        if not u.security_id:
+            logger.warning("no security_id for %s; skipping ORB backfill", u.name)
+            continue
+        try:
+            candles = await dhan.intraday_candles(
+                security_id=u.security_id,
+                exchange_segment=u.chart_exchange_segment,
+                instrument=u.chart_instrument,
+                from_date=today_str,
+                to_date=today_str,
+                interval=1,  # 1-minute candles
+            )
+            if not candles:
+                logger.info("ORB backfill %s: no candles returned (pre-market?)", u.name)
+                continue
+
+            fed = 0
+            for c in candles:
+                # Dhan returns timestamps as epoch seconds (IST-based).
+                ts_raw = c.get("timestamp")
+                if ts_raw is None:
+                    continue
+                # Convert epoch to datetime (IST).
+                ts = datetime.fromtimestamp(ts_raw, tz=IST)
+                spot = float(c.get("close") or c.get("open") or 0)
+                vol = float(c.get("volume") or 1)
+                if spot > 0:
+                    history.record(u.name, spot, vol, ts)
+                    fed += 1
+
+            snap = history.snapshot(u.name)
+            logger.info(
+                "ORB backfill %s: fed %d candles | spot=%s vwap=%s orb=%s/%s break=%s",
+                u.name, fed,
+                snap.get("spot"), snap.get("vwap"),
+                snap.get("orb_high"), snap.get("orb_low"),
+                snap.get("orb_break"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ORB backfill failed for %s: %s", u.name, e)
+
+
 async def _get_expiries(dhan: DhanClient, scrip: int, segment: str) -> List[str]:
     """Return cached expiries when fresh, otherwise refetch."""
     key = (scrip, segment)
@@ -97,15 +149,21 @@ async def run_forever() -> None:
 
     dhan = DhanClient(settings.dhan_client_id, settings.dhan_access_token)
     state.running = True
+
+    # --- ORB Backfill: fetch today's early candles so we have VWAP + ORB
+    # even when starting mid-day. ---
+    logger.info("starting ORB backfill...")
+    await _backfill_orb(dhan)
+    logger.info("ORB backfill complete; beginning live polling.")
+
     logger.info(
         "worker started: %d underlying(s), every %ds, "
-        "momentum 5m=%ds 15m=%ds, ORB %d min, min-mom ±%.2f%%",
+        "momentum 5m=%ds 15m=%ds, ORB %d min",
         len(settings.underlyings),
         settings.poll_interval_seconds,
         settings.rules.momentum_5m_seconds,
         settings.rules.momentum_15m_seconds,
         settings.rules.orb_minutes,
-        settings.rules.spot_momentum_min_pct,
     )
     try:
         while True:
