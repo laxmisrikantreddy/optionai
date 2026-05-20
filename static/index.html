@@ -12,11 +12,22 @@
     header { padding: 14px 20px; border-bottom: 1px solid #1f2733;
       display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.2px; }
-    .pill { padding: 4px 10px; border-radius: 999px; font-size: 12px;
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px;
       background: #1f2733; color: #cbd5e1; }
     .pill.ok { background: #14532d; color: #bbf7d0; }
     .pill.err { background: #7f1d1d; color: #fecaca; }
+    .pill.up { background: #064e3b; color: #6ee7b7; }
+    .pill.down { background: #7f1d1d; color: #fda4af; }
+    .pill.flat { background: #334155; color: #cbd5e1; }
     .muted { color: #94a3b8; font-size: 12px; }
+    .pa-strip { padding: 10px 20px; border-bottom: 1px solid #1f2733;
+      display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px; }
+    .pa-card { background: #111827; border: 1px solid #1f2733; border-radius: 8px;
+      padding: 10px 16px; min-width: 260px; }
+    .pa-card h3 { margin: 0 0 6px; font-size: 13px; color: #94a3b8; font-weight: 500; }
+    .pa-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+    .pa-val { font-weight: 600; font-size: 14px; }
+    .pa-label { color: #94a3b8; font-size: 11px; margin-right: 4px; }
     main { padding: 14px 20px 60px; }
     .table-wrap { overflow-x: auto; border: 1px solid #1f2733; border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -31,20 +42,25 @@
     .empty { padding: 40px; text-align: center; color: #94a3b8; }
     .rule { font-size: 11px; padding: 2px 6px; border-radius: 4px;
       background: #1e293b; color: #cbd5e1; }
+    .filters { font-size: 10px; padding: 2px 5px; border-radius: 3px;
+      background: #064e3b; color: #6ee7b7; margin-left: 4px; }
+    .pos { color: #4ade80; }
+    .neg { color: #f87171; }
   </style>
 </head>
 <body>
   <header>
     <h1>OptionAI · Live Option-Buy Signals</h1>
-    <span id="statusPill" class="pill">connecting…</span>
+    <span id="statusPill" class="pill">connecting...</span>
     <span id="lastPoll" class="muted"></span>
     <span id="errPill" class="pill err" style="display:none"></span>
     <span class="muted" style="margin-left:auto" id="cfgInfo"></span>
   </header>
+  <div class="pa-strip" id="paStrip"></div>
 
   <main>
     <div class="table-wrap">
-      <table id="tbl">
+      <table>
         <thead>
           <tr>
             <th>Time</th>
@@ -55,17 +71,22 @@
             <th class="num">LTP</th>
             <th class="num">SL</th>
             <th class="num">Target</th>
-            <th class="num">Delta</th>
-            <th class="num">IV</th>
-            <th class="num">OI Δ%</th>
-            <th class="num">LTP Δ%</th>
+            <th class="num">Spot</th>
+            <th class="num">VWAP</th>
+            <th class="num">5m %</th>
+            <th class="num">15m %</th>
+            <th class="num">OI &Delta;%</th>
             <th>Rule</th>
+            <th>Filters</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <div id="empty" class="empty">Waiting for signals… the engine polls every few seconds.</div>
+    <div id="empty" class="empty">
+      Warming up... the engine needs ~15 minutes of spot data before emitting signals.<br>
+      <span class="muted">Filters: Multi-TF (5m+15m) + VWAP + ORB must ALL agree on direction.</span>
+    </div>
   </main>
   <script src="/static/app.js"></script>
 </body>

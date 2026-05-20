@@ -7,28 +7,45 @@ underlyings:
   - name: NIFTY
     scrip: 13
     segment: IDX_I
+    security_id: "13"
+    chart_exchange_segment: IDX_I
+    chart_instrument: INDEX
   - name: BANKNIFTY
     scrip: 25
     segment: IDX_I
+    security_id: "25"
+    chart_exchange_segment: IDX_I
+    chart_instrument: INDEX
 
-# Seconds between polls. Dhan option-chain limit is ~1 req / 3s, so keep >= 5s
-# when monitoring 2 underlyings (each poll = expiry + chain = 2 calls).
-poll_interval_seconds: 5
+# Seconds between poll cycles.
+poll_interval_seconds: 10
 
 # Stop-loss and target sizing for option BUYS.
-#   sl_pct = fraction of premium risked (0.30 = 30% of premium = SL)
-#   rr     = risk:reward, target = entry * (1 + sl_pct * rr)
 risk:
-  sl_pct: 0.30
-  rr: 2.0
+  sl_pct: 0.30        # 30% of premium = SL
+  rr: 2.0             # target = entry * (1 + sl_pct * rr) -> 60% above entry
 
-# Rule thresholds.
+# Rule thresholds and price-action filters.
 rules:
   delta_min: 0.35              # only emit signals on strikes with |delta| in this band
   delta_max: 0.55
   oi_change_pct_min: 20.0      # min OI %change for LONG_BUILDUP
   price_change_pct_min: 5.0    # min LTP %change for any rule
-  short_cover_oi_drop_pct: 15.0  # min OI %drop (absolute) for SHORT_COVERING
+  short_cover_oi_drop_pct: 15.0  # min OI %drop for SHORT_COVERING
+
+  # Multi-timeframe momentum (BOTH must agree on direction).
+  # CE fires only when 5m AND 15m momentum are BOTH positive.
+  # PE fires only when 5m AND 15m momentum are BOTH negative.
+  spot_momentum_min_pct: 0.10  # minimum % move to call a direction
+  momentum_5m_seconds: 300     # 5-minute window
+  momentum_15m_seconds: 900    # 15-minute window
+
+  # Opening Range Breakout (ORB).
+  # The range of the first N minutes after 9:15 IST defines the ORB.
+  # CE allowed only AFTER spot breaks above ORB high.
+  # PE allowed only AFTER spot breaks below ORB low.
+  # Inside the range = no signals.
+  orb_minutes: 15              # 9:15 to 9:30 = 15 minutes
 
 # Don't re-emit the same (underlying, strike, side, rule) within this window.
 signal_dedup_window_seconds: 300

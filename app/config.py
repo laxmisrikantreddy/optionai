@@ -16,6 +16,12 @@ class Underlying(BaseModel):
     name: str
     scrip: int
     segment: str
+    # For intraday candle API (ORB backfill). Same as scrip but as string.
+    security_id: str = ""
+    # Exchange segment string for the charts API (e.g. "IDX_I" for indices).
+    chart_exchange_segment: str = "IDX_I"
+    # Instrument type for the charts API.
+    chart_instrument: str = "INDEX"
 
 
 class RiskCfg(BaseModel):
@@ -29,11 +35,17 @@ class RulesCfg(BaseModel):
     oi_change_pct_min: float = 20.0
     price_change_pct_min: float = 5.0
     short_cover_oi_drop_pct: float = 15.0
+    # Multi-timeframe momentum: both windows must agree on direction.
+    spot_momentum_min_pct: float = 0.10
+    momentum_5m_seconds: int = 300
+    momentum_15m_seconds: int = 900
+    # ORB: opening range period (minutes after 09:15 IST).
+    orb_minutes: int = 15  # 9:15 to 9:30 = 15 minutes
 
 
 class Settings(BaseModel):
     underlyings: List[Underlying]
-    poll_interval_seconds: int = 5
+    poll_interval_seconds: int = 10
     risk: RiskCfg = RiskCfg()
     rules: RulesCfg = RulesCfg()
     signal_dedup_window_seconds: int = 300

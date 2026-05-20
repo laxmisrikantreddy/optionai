@@ -39,6 +39,10 @@ app = FastAPI(title="OptionAI Signal Generator", lifespan=lifespan)
 
 @app.get("/api/health")
 def health():
+    # Per-underlying price-action snapshot for the dashboard header.
+    snapshots = {}
+    for u in settings.underlyings:
+        snapshots[u.name] = worker.history.snapshot(u.name)
     return {
         "ok": True,
         "running": worker.state.running,
@@ -47,6 +51,13 @@ def health():
         "last_error": worker.state.last_error,
         "underlyings": [u.name for u in settings.underlyings],
         "poll_interval_seconds": settings.poll_interval_seconds,
+        "snapshots": snapshots,
+        "rules": {
+            "spot_momentum_min_pct": settings.rules.spot_momentum_min_pct,
+            "orb_minutes": settings.rules.orb_minutes,
+            "momentum_5m_seconds": settings.rules.momentum_5m_seconds,
+            "momentum_15m_seconds": settings.rules.momentum_15m_seconds,
+        },
     }
 
 
