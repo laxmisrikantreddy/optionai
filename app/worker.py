@@ -1,26 +1,31 @@
 """Background poller: fetches option chains and feeds signals into the store."""
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from .config import settings
 from .dhan_client import DhanClient
-from .signals import SpotTracker, evaluate
+from .signals import PriceActionContext, evaluate
+from .spot_history import SpotHistory
 from .store import store
 
 logger = logging.getLogger(__name__)
 
-# Cache the expiry list per (scrip, segment). Expiries don't change intraday,
-# so refetching every poll wastes a Dhan call we can spend elsewhere.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# Cache the expiry list per (scrip, segment). Expiries don't change intraday.
 EXPIRY_TTL = timedelta(hours=6)
 _expiry_cache: Dict[Tuple[int, str], Tuple[datetime, List[str]]] = {}
 
-# Rolling spot-price tracker per underlying, used by the rule engine to
-# decide direction (CE on uptrend, PE on downtrend, neither on chop).
-spot_tracker = SpotTracker(
-    lookback_seconds=settings.rules.spot_lookback_seconds,
-)
+# ORB end time from config (9:15 + orb_minutes).
+_orb_end = (
+    datetime.combine(datetime.today(), time(9, 15))
+    + timedelta(minutes=settings.rules.orb_minutes)
+).time()
+
+# Global spot history used by all rules.
+history = SpotHistory(orb_end_time=_orb_end)
 
 
 class WorkerState:
@@ -29,9 +34,6 @@ class WorkerState:
         self.last_error: Optional[str] = None
         self.running: bool = False
         self.poll_count: int = 0
-        # Latest spot snapshot per underlying for the dashboard banner.
-        self.spot: Dict[str, float] = {}
-        self.spot_momentum_pct: Dict[str, Optional[float]] = {}
 
 
 state = WorkerState()
@@ -60,33 +62,31 @@ async def _poll_once(dhan: DhanClient) -> None:
             chain = await dhan.option_chain(u.scrip, u.segment, expiry)
 
             spot = float(chain.get("last_price") or 0.0)
+            volume = float(chain.get("volume") or 0.0)
             now = datetime.now(timezone.utc)
-            spot_tracker.update(u.name, spot, now)
-            mom = spot_tracker.momentum_pct(u.name, now)
 
-            state.spot[u.name] = spot
-            state.spot_momentum_pct[u.name] = (
-                round(mom, 3) if mom is not None else None
-            )
+            # Feed spot into history for VWAP / ORB / multi-TF.
+            history.record(u.name, spot, volume, now)
 
-            sigs = evaluate(
-                u.name, expiry, chain,
-                settings.rules, settings.risk,
-                spot=spot, spot_momentum_pct=mom,
-            )
+            # Build price-action context for the rule engine.
+            pa = PriceActionContext(history, u.name, settings.rules)
+
+            sigs = evaluate(u.name, expiry, chain, settings.rules, settings.risk, pa)
             added = sum(1 for s in sigs if store.add(s))
             if added:
                 logger.info(
-                    "%s %s: %d new signal(s) | spot=%.2f mom=%s",
+                    "%s %s: %d signal(s) | spot=%.2f vwap=%s orb=%s 5m=%s 15m=%s",
                     u.name, expiry, added, spot,
-                    f"{mom:+.2f}%" if mom is not None else "warming up",
+                    f"{pa.vwap:.2f}" if pa.vwap else "-",
+                    pa.orb_break or "-",
+                    f"{pa.mom_5m:+.2f}%" if pa.mom_5m is not None else "-",
+                    f"{pa.mom_15m:+.2f}%" if pa.mom_15m is not None else "-",
                 )
-            # Clear last error on a clean cycle for this underlying.
             state.last_error = None
         except Exception as e:  # noqa: BLE001
             state.last_error = f"{u.name}: {type(e).__name__}: {e}"
             logger.exception("poll failed for %s", u.name)
-            await asyncio.sleep(2)  # back off briefly on error
+            await asyncio.sleep(2)
 
 
 async def run_forever() -> None:
@@ -98,10 +98,14 @@ async def run_forever() -> None:
     dhan = DhanClient(settings.dhan_client_id, settings.dhan_access_token)
     state.running = True
     logger.info(
-        "worker started: %d underlying(s), every %ds, momentum window %ds",
+        "worker started: %d underlying(s), every %ds, "
+        "momentum 5m=%ds 15m=%ds, ORB %d min, min-mom ±%.2f%%",
         len(settings.underlyings),
         settings.poll_interval_seconds,
-        settings.rules.spot_lookback_seconds,
+        settings.rules.momentum_5m_seconds,
+        settings.rules.momentum_15m_seconds,
+        settings.rules.orb_minutes,
+        settings.rules.spot_momentum_min_pct,
     )
     try:
         while True:

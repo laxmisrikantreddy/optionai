@@ -29,17 +29,17 @@ class RulesCfg(BaseModel):
     oi_change_pct_min: float = 20.0
     price_change_pct_min: float = 5.0
     short_cover_oi_drop_pct: float = 15.0
-    # Direction filter aligns option side with underlying spot momentum.
-    #   - CE allowed only when spot momentum >= +spot_momentum_min_pct
-    #   - PE allowed only when spot momentum <= -spot_momentum_min_pct
-    # Momentum is computed over a rolling spot_lookback_seconds window.
-    spot_lookback_seconds: int = 300
+    # Multi-timeframe momentum: both windows must agree on direction.
     spot_momentum_min_pct: float = 0.10
+    momentum_5m_seconds: int = 300
+    momentum_15m_seconds: int = 900
+    # ORB: opening range period (minutes after 09:15 IST).
+    orb_minutes: int = 15  # 9:15 to 9:30 = 15 minutes
 
 
 class Settings(BaseModel):
     underlyings: List[Underlying]
-    poll_interval_seconds: int = 5
+    poll_interval_seconds: int = 10
     risk: RiskCfg = RiskCfg()
     rules: RulesCfg = RulesCfg()
     signal_dedup_window_seconds: int = 300
