@@ -1,4 +1,4 @@
-"""Signal model and rule engine.
+"""Signal model, spot-momentum tracker, and rule engine.
 
 Operates on a Dhan option-chain payload of the shape:
 
@@ -18,8 +18,10 @@ Operates on a Dhan option-chain payload of the shape:
       }
     }
 """
-from datetime import datetime, timezone
-from typing import Dict, List
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from threading import Lock
+from typing import Deque, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 
@@ -33,6 +35,8 @@ class Signal(BaseModel):
     expiry: str
     side: str            # "CE" or "PE"
     strike: float
+    spot: float          # underlying spot at the moment the signal fired
+    spot_momentum_pct: float  # % change of spot over the lookback window
     ltp: float
     sl: float
     target: float
@@ -43,6 +47,51 @@ class Signal(BaseModel):
     price_change_pct: float
     rule: str
     note: str = ""
+
+
+class SpotTracker:
+    """Tracks recent underlying spot prices to compute short-term momentum.
+
+    momentum_pct = (current_spot - oldest_spot_in_window) / oldest_spot_in_window * 100
+
+    Returns None until the buffer has at least one sample older than the
+    lookback window (i.e., during warm-up just after startup).
+    """
+
+    def __init__(self, lookback_seconds: int = 300, capacity: int = 600):
+        self._buf: Dict[str, Deque[Tuple[datetime, float]]] = {}
+        self._lock = Lock()
+        self._lookback = timedelta(seconds=lookback_seconds)
+        self._capacity = capacity
+
+    def update(self, underlying: str, spot: float, ts: datetime) -> None:
+        if not spot or spot <= 0:
+            return
+        with self._lock:
+            buf = self._buf.setdefault(
+                underlying, deque(maxlen=self._capacity)
+            )
+            buf.append((ts, float(spot)))
+
+    def momentum_pct(self, underlying: str, now: datetime) -> Optional[float]:
+        with self._lock:
+            buf = self._buf.get(underlying)
+            if not buf or len(buf) < 2:
+                return None
+            # Need at least one sample older than the lookback window.
+            oldest_ts = buf[0][0]
+            if (now - oldest_ts) < self._lookback:
+                return None
+            cutoff = now - self._lookback
+            past_spot: Optional[float] = None
+            for ts, sp in buf:
+                if ts >= cutoff:
+                    past_spot = sp
+                    break
+            if past_spot is None or past_spot == 0:
+                return None
+            current_spot = buf[-1][1]
+            return (current_spot - past_spot) / past_spot * 100.0
 
 
 def _row(strike: float, side_key: str, side_data: dict) -> dict:
@@ -72,9 +121,25 @@ def evaluate(
     chain: Dict,
     rules: RulesCfg,
     risk: RiskCfg,
+    spot: float,
+    spot_momentum_pct: Optional[float],
 ) -> List[Signal]:
-    """Run all rules over a Dhan option-chain payload, return signals."""
+    """Run all rules over a Dhan option-chain payload, return signals.
+
+    Direction filter:
+      * CE allowed only when spot_momentum_pct >= +rules.spot_momentum_min_pct
+      * PE allowed only when spot_momentum_pct <= -rules.spot_momentum_min_pct
+      * Sideways or warm-up (None) -> emit nothing.
+    """
     out: List[Signal] = []
+    if spot_momentum_pct is None:
+        return out
+    if abs(spot_momentum_pct) < rules.spot_momentum_min_pct:
+        return out
+
+    direction_is_up = spot_momentum_pct >= rules.spot_momentum_min_pct
+    direction_is_down = spot_momentum_pct <= -rules.spot_momentum_min_pct
+
     oc = chain.get("oc") or {}
     now = datetime.now(timezone.utc)
 
@@ -85,10 +150,16 @@ def evaluate(
             continue
         ce = sides.get("ce") or {}
         pe = sides.get("pe") or {}
-        if ce:
-            out += _eval_side(underlying, expiry, _row(strike, "ce", ce), rules, risk, now)
-        if pe:
-            out += _eval_side(underlying, expiry, _row(strike, "pe", pe), rules, risk, now)
+        if ce and direction_is_up:
+            out += _eval_side(
+                underlying, expiry, _row(strike, "ce", ce),
+                rules, risk, now, spot, spot_momentum_pct,
+            )
+        if pe and direction_is_down:
+            out += _eval_side(
+                underlying, expiry, _row(strike, "pe", pe),
+                rules, risk, now, spot, spot_momentum_pct,
+            )
     return out
 
 
@@ -99,6 +170,8 @@ def _eval_side(
     rules: RulesCfg,
     risk: RiskCfg,
     now: datetime,
+    spot: float,
+    spot_momentum_pct: float,
 ) -> List[Signal]:
     sigs: List[Signal] = []
 
@@ -109,31 +182,33 @@ def _eval_side(
     if r["ltp"] <= 0:
         return sigs
 
+    common = dict(
+        timestamp=now,
+        underlying=underlying,
+        expiry=expiry,
+        side=r["side"],
+        strike=r["strike"],
+        spot=round(spot, 2),
+        spot_momentum_pct=round(spot_momentum_pct, 3),
+        ltp=r["ltp"],
+        delta=r["delta"],
+        iv=r["iv"],
+        oi=r["oi"],
+        oi_change_pct=round(r["oi_change_pct"], 2),
+        price_change_pct=round(r["price_change_pct"], 2),
+    )
+
     # Rule 1: long buildup on this side (price up + OI up). Buy this side.
     if (
         r["oi_change_pct"] >= rules.oi_change_pct_min
         and r["price_change_pct"] >= rules.price_change_pct_min
     ):
         sl, tgt = sl_target(r["ltp"], risk.sl_pct, risk.rr)
-        sigs.append(
-            Signal(
-                timestamp=now,
-                underlying=underlying,
-                expiry=expiry,
-                side=r["side"],
-                strike=r["strike"],
-                ltp=r["ltp"],
-                sl=sl,
-                target=tgt,
-                delta=r["delta"],
-                iv=r["iv"],
-                oi=r["oi"],
-                oi_change_pct=round(r["oi_change_pct"], 2),
-                price_change_pct=round(r["price_change_pct"], 2),
-                rule="LONG_BUILDUP",
-                note=f"OI +{r['oi_change_pct']:.1f}%, LTP +{r['price_change_pct']:.1f}%",
-            )
-        )
+        sigs.append(Signal(
+            **common, sl=sl, target=tgt,
+            rule="LONG_BUILDUP",
+            note=f"spot {spot_momentum_pct:+.2f}% | OI +{r['oi_change_pct']:.1f}% | LTP +{r['price_change_pct']:.1f}%",
+        ))
 
     # Rule 2: short covering on this side (price up + OI dropping). Buy this side.
     if (
@@ -141,24 +216,10 @@ def _eval_side(
         and r["price_change_pct"] >= rules.price_change_pct_min
     ):
         sl, tgt = sl_target(r["ltp"], risk.sl_pct, risk.rr)
-        sigs.append(
-            Signal(
-                timestamp=now,
-                underlying=underlying,
-                expiry=expiry,
-                side=r["side"],
-                strike=r["strike"],
-                ltp=r["ltp"],
-                sl=sl,
-                target=tgt,
-                delta=r["delta"],
-                iv=r["iv"],
-                oi=r["oi"],
-                oi_change_pct=round(r["oi_change_pct"], 2),
-                price_change_pct=round(r["price_change_pct"], 2),
-                rule="SHORT_COVERING",
-                note=f"OI {r['oi_change_pct']:.1f}%, LTP +{r['price_change_pct']:.1f}%",
-            )
-        )
+        sigs.append(Signal(
+            **common, sl=sl, target=tgt,
+            rule="SHORT_COVERING",
+            note=f"spot {spot_momentum_pct:+.2f}% | OI {r['oi_change_pct']:.1f}% | LTP +{r['price_change_pct']:.1f}%",
+        ))
 
     return sigs

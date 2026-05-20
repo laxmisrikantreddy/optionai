@@ -29,6 +29,12 @@ class RulesCfg(BaseModel):
     oi_change_pct_min: float = 20.0
     price_change_pct_min: float = 5.0
     short_cover_oi_drop_pct: float = 15.0
+    # Direction filter aligns option side with underlying spot momentum.
+    #   - CE allowed only when spot momentum >= +spot_momentum_min_pct
+    #   - PE allowed only when spot momentum <= -spot_momentum_min_pct
+    # Momentum is computed over a rolling spot_lookback_seconds window.
+    spot_lookback_seconds: int = 300
+    spot_momentum_min_pct: float = 0.10
 
 
 class Settings(BaseModel):

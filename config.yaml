@@ -11,9 +11,10 @@ underlyings:
     scrip: 25
     segment: IDX_I
 
-# Seconds between polls. Dhan option-chain limit is ~1 req / 3s, so keep >= 5s
-# when monitoring 2 underlyings (each poll = expiry + chain = 2 calls).
-poll_interval_seconds: 5
+# Seconds between poll cycles. Dhan's option-chain limit is ~1 req / 3s, and
+# the DhanClient enforces that gap internally. With 2 underlyings (1 chain
+# call each, expiry list cached) a cycle takes ~7s, so 10s gives a safety buffer.
+poll_interval_seconds: 10
 
 # Stop-loss and target sizing for option BUYS.
 #   sl_pct = fraction of premium risked (0.30 = 30% of premium = SL)
@@ -29,6 +30,16 @@ rules:
   oi_change_pct_min: 20.0      # min OI %change for LONG_BUILDUP
   price_change_pct_min: 5.0    # min LTP %change for any rule
   short_cover_oi_drop_pct: 15.0  # min OI %drop (absolute) for SHORT_COVERING
+
+  # Direction filter: aligns signal side with underlying spot momentum.
+  # Spot momentum = % change of underlying spot over `spot_lookback_seconds`.
+  #   - CE signals fire only when spot momentum >= +spot_momentum_min_pct
+  #   - PE signals fire only when spot momentum <= -spot_momentum_min_pct
+  #   - Sideways (|momentum| below threshold) emits nothing.
+  # During the first `spot_lookback_seconds` after startup the engine has no
+  # history, so it stays quiet -- that's the warm-up phase, expected.
+  spot_lookback_seconds: 300   # 5-minute momentum window
+  spot_momentum_min_pct: 0.10  # 0.10 % min move to call a direction
 
 # Don't re-emit the same (underlying, strike, side, rule) within this window.
 signal_dedup_window_seconds: 300

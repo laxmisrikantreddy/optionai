@@ -1,15 +1,26 @@
 """Background poller: fetches option chains and feeds signals into the store."""
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
 
 from .config import settings
 from .dhan_client import DhanClient
-from .signals import evaluate
+from .signals import SpotTracker, evaluate
 from .store import store
 
 logger = logging.getLogger(__name__)
+
+# Cache the expiry list per (scrip, segment). Expiries don't change intraday,
+# so refetching every poll wastes a Dhan call we can spend elsewhere.
+EXPIRY_TTL = timedelta(hours=6)
+_expiry_cache: Dict[Tuple[int, str], Tuple[datetime, List[str]]] = {}
+
+# Rolling spot-price tracker per underlying, used by the rule engine to
+# decide direction (CE on uptrend, PE on downtrend, neither on chop).
+spot_tracker = SpotTracker(
+    lookback_seconds=settings.rules.spot_lookback_seconds,
+)
 
 
 class WorkerState:
@@ -18,24 +29,58 @@ class WorkerState:
         self.last_error: Optional[str] = None
         self.running: bool = False
         self.poll_count: int = 0
+        # Latest spot snapshot per underlying for the dashboard banner.
+        self.spot: Dict[str, float] = {}
+        self.spot_momentum_pct: Dict[str, Optional[float]] = {}
 
 
 state = WorkerState()
 
 
+async def _get_expiries(dhan: DhanClient, scrip: int, segment: str) -> List[str]:
+    """Return cached expiries when fresh, otherwise refetch."""
+    key = (scrip, segment)
+    now = datetime.now(timezone.utc)
+    cached = _expiry_cache.get(key)
+    if cached and (now - cached[0]) < EXPIRY_TTL:
+        return cached[1]
+    expiries = await dhan.expiry_list(scrip, segment)
+    _expiry_cache[key] = (now, expiries)
+    return expiries
+
+
 async def _poll_once(dhan: DhanClient) -> None:
     for u in settings.underlyings:
         try:
-            expiries = await dhan.expiry_list(u.scrip, u.segment)
+            expiries = await _get_expiries(dhan, u.scrip, u.segment)
             if not expiries:
                 logger.warning("no expiries returned for %s", u.name)
                 continue
             expiry = expiries[0]  # nearest expiry
             chain = await dhan.option_chain(u.scrip, u.segment, expiry)
-            sigs = evaluate(u.name, expiry, chain, settings.rules, settings.risk)
+
+            spot = float(chain.get("last_price") or 0.0)
+            now = datetime.now(timezone.utc)
+            spot_tracker.update(u.name, spot, now)
+            mom = spot_tracker.momentum_pct(u.name, now)
+
+            state.spot[u.name] = spot
+            state.spot_momentum_pct[u.name] = (
+                round(mom, 3) if mom is not None else None
+            )
+
+            sigs = evaluate(
+                u.name, expiry, chain,
+                settings.rules, settings.risk,
+                spot=spot, spot_momentum_pct=mom,
+            )
             added = sum(1 for s in sigs if store.add(s))
             if added:
-                logger.info("%s %s: %d new signal(s)", u.name, expiry, added)
+                logger.info(
+                    "%s %s: %d new signal(s) | spot=%.2f mom=%s",
+                    u.name, expiry, added, spot,
+                    f"{mom:+.2f}%" if mom is not None else "warming up",
+                )
             # Clear last error on a clean cycle for this underlying.
             state.last_error = None
         except Exception as e:  # noqa: BLE001
@@ -53,9 +98,10 @@ async def run_forever() -> None:
     dhan = DhanClient(settings.dhan_client_id, settings.dhan_access_token)
     state.running = True
     logger.info(
-        "worker started: %d underlying(s), every %ds",
+        "worker started: %d underlying(s), every %ds, momentum window %ds",
         len(settings.underlyings),
         settings.poll_interval_seconds,
+        settings.rules.spot_lookback_seconds,
     )
     try:
         while True:

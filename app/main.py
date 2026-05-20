@@ -47,6 +47,10 @@ def health():
         "last_error": worker.state.last_error,
         "underlyings": [u.name for u in settings.underlyings],
         "poll_interval_seconds": settings.poll_interval_seconds,
+        "spot": worker.state.spot,
+        "spot_momentum_pct": worker.state.spot_momentum_pct,
+        "spot_lookback_seconds": settings.rules.spot_lookback_seconds,
+        "spot_momentum_min_pct": settings.rules.spot_momentum_min_pct,
     }
 
 
