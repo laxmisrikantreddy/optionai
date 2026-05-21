@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>⚡ Live OI + PA + History — NIFTY Dashboard</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'IBM Plex Mono','Fira Code','Courier New',monospace;background:#07090f;color:#dce6f5;min-height:100vh;padding:14px}
+.hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #151d30;flex-wrap:wrap;gap:10px}
+.hdr-left{}.hdr-title{font-size:14px;font-weight:700;letter-spacing:3px;color:#5b9bff;text-transform:uppercase}
+.hdr-sub{font-size:8px;color:#2a3a5a;letter-spacing:2px;margin-top:2px}
+.hdr-expiry{font-size:8px;color:#3a4a6a;margin-top:1px}
+.hdr-right{text-align:right}
+.spot-price{font-size:26px;font-weight:700;letter-spacing:1px}
+.spot-green{color:#00e676}.spot-red{color:#ff5252}.spot-gray{color:#3a4a6a}
+.hdr-time{font-size:8px;color:#2a3a5a;margin-top:2px}
+.status-dot{font-size:8px;margin-top:2px}
+.status-ok{color:#00e676}.status-loading{color:#ffd740}.status-err{color:#ff5252}
+.refresh-btn{background:#5b9bff15;border:1px solid #5b9bff40;color:#5b9bff;border-radius:5px;padding:4px 12px;cursor:pointer;font-size:9px;font-weight:700;letter-spacing:1px;font-family:inherit}
+.refresh-btn:hover{background:#5b9bff30}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ─────────────────────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────────────────────
+const API = "http://localhost:5000";
+
+// ─────────────────────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────────────────────
+let state = {
+  spot: 0, chain: [], intraday: [], weekly: [], monthly: [], levels: [],
+  expiry: "", status: "loading", lastUpdate: null, tab: "dashboard",
+  chartView: "intraday", selLevel: null
+};
+
+// ─────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────
+function fmt(n){
+  if(n==null||n===undefined)return"—";
+  const a=Math.abs(n);
+  if(a>=100000)return(n/100000).toFixed(1)+"L";
+  if(a>=1000)return(n/1000).toFixed(0)+"K";
+  return n;
+}
+function toIN(n){return n?n.toLocaleString("en-IN"):"—";}
+
+const C={BULLISH:"#00e676",BEARISH:"#ff5252",NEUTRAL:"#ffd740",RESISTANCE:"#ff5252",SUPPORT:"#00e676",PIVOT:"#7eb8ff"};
+const BG={BULLISH:"#00e67612",BEARISH:"#ff525212",NEUTRAL:"#ffd74012",RESISTANCE:"#ff525212",SUPPORT:"#00e67612",PIVOT:"#7eb8ff12"};
+
+function computeMaxPain(chain){
+  if(!chain.length)return 0;
+  let best={strike:0,loss:Infinity};
+  for(const s of chain){
+    let loss=0;
+    for(const r of chain){
+      if(s.strike>r.strike)loss+=(s.strike-r.strike)*r.ce_oi;
+      if(s.strike<r.strike)loss+=(r.strike-s.strike)*r.pe_oi;
+    }
+    if(loss<best.loss)best={strike:s.strike,loss};
+  }
+  return best.strike;
+}
+
+function computePCR(chain){
+  if(!chain.length)return 0;
+  const pe=chain.reduce((a,r)=>a+r.pe_oi,0);
+  const ce=chain.reduce((a,r)=>a+r.ce_oi,0);
+  return ce?+(pe/ce).toFixed(2):0;
+}
+</script>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// PATTERN DETECTION
+// ─────────────────────────────────────────────────────────────
+function detectPatterns(candles){
+  const n=candles.length;
+  if(n<2)return[{type:"NEUTRAL",name:"No data",desc:"Waiting for candle data"}];
+  const c=candles[n-1],p=candles[n-2];
+  const body=x=>Math.abs(x.close-x.open);
+  const range=x=>x.high-x.low;
+  const uw=x=>x.high-Math.max(x.open,x.close);
+  const lw=x=>Math.min(x.open,x.close)-x.low;
+  const sigs=[];
+  if(range(c)>0&&body(c)<range(c)*0.1)sigs.push({type:"NEUTRAL",name:"Doji",desc:"Indecision candle — wait for next direction"});
+  if(body(c)>0&&lw(c)>body(c)*2&&uw(c)<body(c)*0.5)sigs.push({type:"BULLISH",name:"Hammer / Pin Bar",desc:"Strong rejection of lows — possible reversal up"});
+  if(body(c)>0&&uw(c)>body(c)*2&&lw(c)<body(c)*0.5)sigs.push({type:"BEARISH",name:"Shooting Star",desc:"Strong rejection of highs — possible reversal down"});
+  if(c.bullish&&!p.bullish&&c.close>p.open&&c.open<p.close)sigs.push({type:"BULLISH",name:"Bullish Engulfing",desc:"Buyers fully overpowered sellers"});
+  if(!c.bullish&&p.bullish&&c.close<p.open&&c.open>p.close)sigs.push({type:"BEARISH",name:"Bearish Engulfing",desc:"Sellers fully overpowered buyers"});
+  if(range(c)>0&&body(c)>range(c)*0.75&&c.bullish)sigs.push({type:"BULLISH",name:"Bullish Marubozu",desc:"Pure buying momentum"});
+  if(range(c)>0&&body(c)>range(c)*0.75&&!c.bullish)sigs.push({type:"BEARISH",name:"Bearish Marubozu",desc:"Pure selling momentum"});
+  if(!sigs.length)sigs.push({type:"NEUTRAL",name:"No Pattern",desc:"No confirmed pattern on last candle"});
+  return sigs;
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONFLUENCE SCORING
+// ─────────────────────────────────────────────────────────────
+function getConfluence(paSignals,chain,candles,spot,maxPain,pcr,levels){
+  if(!candles.length||!chain.length)return{bias:"NEUTRAL",strength:0,bull:0,bear:0,reasons:[]};
+  const lastC=candles[candles.length-1];
+  const orb={high:candles[0]?.high||spot+50,low:candles[0]?.low||spot-50};
+  let bull=0,bear=0,reasons=[];
+  paSignals.forEach(s=>{
+    if(s.type==="BULLISH"){bull+=2;reasons.push({side:"BULL",text:"PA: "+s.name});}
+    if(s.type==="BEARISH"){bear+=2;reasons.push({side:"BEAR",text:"PA: "+s.name});}
+  });
+  if(lastC.close>orb.high){bull+=2;reasons.push({side:"BULL",text:"Above ORB High"});}
+  if(lastC.close<orb.low){bear+=2;reasons.push({side:"BEAR",text:"Below ORB Low"});}
+  const atm=chain.reduce((a,r)=>Math.abs(r.strike-spot)<Math.abs(a.strike-spot)?r:a,chain[0]);
+  if(atm){
+    if(atm.ce_chg<-30000){bull+=1;reasons.push({side:"BULL",text:"CE OI unwinding"});}
+    if(atm.pe_chg>30000){bull+=1;reasons.push({side:"BULL",text:"PE OI building"});}
+    if(atm.pe_chg<-30000){bear+=1;reasons.push({side:"BEAR",text:"PE OI unwinding"});}
+    if(atm.ce_chg>30000){bear+=1;reasons.push({side:"BEAR",text:"CE OI building"});}
+  }
+  if(pcr>1.2){bull+=1;reasons.push({side:"BULL",text:"PCR "+pcr+" — oversold"});}
+  if(pcr<0.8){bear+=1;reasons.push({side:"BEAR",text:"PCR "+pcr+" — overbought"});}
+  levels.filter(l=>Math.abs(l.price-spot)<300).forEach(l=>{
+    if(l.type==="SUPPORT"){bull+=Math.min(3,l.touches);reasons.push({side:"BULL",text:"History: Support @"+l.price+" ("+l.touches+"×)"});}
+    if(l.type==="RESISTANCE"){bear+=Math.min(3,l.touches);reasons.push({side:"BEAR",text:"History: Resistance @"+l.price+" ("+l.touches+"×)"});}
+  });
+  const total=bull+bear||1;
+  const bias=bull>bear?"BULLISH":bear>bull?"BEARISH":"NEUTRAL";
+  return{bias,strength:Math.round((Math.max(bull,bear)/total)*100),bull,bear,reasons};
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// CANDLESTICK SVG RENDERER
+// ─────────────────────────────────────────────────────────────
+function renderCandleSVG(candles, orb, spot, levels, height){
+  height=height||200;
+  if(!candles.length)return '<div style="height:'+height+'px;display:flex;align-items:center;justify-content:center;color:#2a3a5a;font-size:11px">No candle data</div>';
+  const W=620,H=height,P={l:50,r:8,t:10,b:18};
+  const chartW=W-P.l-P.r,chartH=H-P.t-P.b;
+  const allP=candles.flatMap(c=>[c.high,c.low]);
+  const minP=Math.min(...allP)-40,maxP=Math.max(...allP)+40;
+  const sY=p=>P.t+chartH-((p-minP)/(maxP-minP))*chartH;
+  const gapW=chartW/candles.length;
+  const cW=Math.max(2,gapW-1.5);
+  let svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:100%">';
+
+  // Grid lines
+  [0,.25,.5,.75,1].forEach(f=>{
+    const y=P.t+chartH*f,price=Math.round(maxP-f*(maxP-minP));
+    svg+='<line x1="'+P.l+'" x2="'+(W-P.r)+'" y1="'+y+'" y2="'+y+'" stroke="#151d30" stroke-width="0.5"/>';
+    svg+='<text x="'+(P.l-3)+'" y="'+(y+3)+'" fill="#2a3a5a" font-size="7" text-anchor="end">'+price+'</text>';
+  });
+
+  // Historical levels
+  levels.filter(l=>l.price>=minP&&l.price<=maxP).forEach(l=>{
+    const z0=l.zone?l.zone[0]:l.price-30,z1=l.zone?l.zone[1]:l.price+30;
+    const col=C[l.type]||"#5b9bff";
+    svg+='<rect x="'+P.l+'" y="'+sY(z1)+'" width="'+chartW+'" height="'+Math.max(1,sY(z0)-sY(z1))+'" fill="'+col+'10"/>';
+    svg+='<line x1="'+P.l+'" x2="'+(W-P.r)+'" y1="'+sY(l.price)+'" y2="'+sY(l.price)+'" stroke="'+col+'" stroke-width="0.8" stroke-dasharray="5,3" opacity="0.7"/>';
+    svg+='<text x="'+(W-P.r-2)+'" y="'+(sY(l.price)-3)+'" fill="'+col+'" font-size="6.5" text-anchor="end">'+l.price+' ('+l.touches+'×)</text>';
+  });
+
+  // ORB band
+  if(orb){
+    svg+='<rect x="'+P.l+'" y="'+sY(orb.high)+'" width="'+chartW+'" height="'+Math.max(1,sY(orb.low)-sY(orb.high))+'" fill="#5b9bff08"/>';
+    svg+='<line x1="'+P.l+'" x2="'+(W-P.r)+'" y1="'+sY(orb.high)+'" y2="'+sY(orb.high)+'" stroke="#5b9bff" stroke-width="0.7" stroke-dasharray="3,2"/>';
+    svg+='<line x1="'+P.l+'" x2="'+(W-P.r)+'" y1="'+sY(orb.low)+'" y2="'+sY(orb.low)+'" stroke="#5b9bff" stroke-width="0.7" stroke-dasharray="3,2"/>';
+    svg+='<text x="'+(P.l+3)+'" y="'+(sY(orb.high)-3)+'" fill="#5b9bff" font-size="6.5">ORB H '+Math.round(orb.high)+'</text>';
+    svg+='<text x="'+(P.l+3)+'" y="'+(sY(orb.low)+9)+'" fill="#5b9bff" font-size="6.5">ORB L '+Math.round(orb.low)+'</text>';
+  }
+
+  // Spot line
+  if(spot>0){
+    svg+='<line x1="'+P.l+'" x2="'+(W-P.r)+'" y1="'+sY(spot)+'" y2="'+sY(spot)+'" stroke="#00e5ff" stroke-width="0.7" stroke-dasharray="2,2"/>';
+    svg+='<text x="'+(W-P.r-2)+'" y="'+(sY(spot)+9)+'" fill="#00e5ff" font-size="6.5" text-anchor="end">▶ '+Math.round(spot)+'</text>';
+  }
+
+  // Candles
+  candles.forEach((c,i)=>{
+    const cx=P.l+i*gapW+gapW/2;
+    const col=c.bullish?"#00e676":"#ff5252";
+    const bTop=sY(Math.max(c.open,c.close));
+    const bBot=sY(Math.min(c.open,c.close));
+    svg+='<line x1="'+cx+'" x2="'+cx+'" y1="'+sY(c.high)+'" y2="'+sY(c.low)+'" stroke="'+col+'" stroke-width="0.8"/>';
+    svg+='<rect x="'+(cx-cW/2)+'" y="'+bTop+'" width="'+cW+'" height="'+Math.max(1,bBot-bTop)+'" fill="'+col+'" opacity="0.85" rx="0.5"/>';
+    if(i%4===0)svg+='<text x="'+cx+'" y="'+(H-3)+'" fill="#2a3a5a" font-size="6.5" text-anchor="middle">'+(c.time||c.label||"")+'</text>';
+  });
+  svg+='</svg>';
+  return svg;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// DATA FETCHER
+// ─────────────────────────────────────────────────────────────
+async function fetchAll(){
+  try{
+    state.status="loading";
+    render();
+    const [spotRes,chainRes,intradayRes,weeklyRes,monthlyRes,levelsRes]=await Promise.all([
+      fetch(API+"/spot").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+      fetch(API+"/optionchain").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+      fetch(API+"/intraday").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+      fetch(API+"/historical/weekly").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+      fetch(API+"/historical/monthly").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+      fetch(API+"/levels").then(r=>r.json()).catch(()=>({error:"fetch failed"})),
+    ]);
+    if(spotRes.error)throw new Error(spotRes.error);
+    if(chainRes.error)throw new Error(chainRes.error);
+    state.spot=spotRes.spot||0;
+    state.chain=chainRes.chain||[];
+    state.expiry=chainRes.expiry||"";
+    state.intraday=intradayRes.candles||[];
+    state.weekly=weeklyRes.candles||[];
+    state.monthly=monthlyRes.candles||[];
+    state.levels=levelsRes.levels||[];
+    state.lastUpdate=new Date();
+    state.status="ok";
+  }catch(e){
+    state.status="error: "+e.message;
+  }
+  render();
+}
+
+// Auto-refresh
+let refreshInterval=null;
+function startAutoRefresh(){
+  if(refreshInterval)clearInterval(refreshInterval);
+  refreshInterval=setInterval(()=>{if(state.status==="ok")fetchAll();},30000);
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — MAIN
+// ─────────────────────────────────────────────────────────────
+function render(){
+  const {spot,chain,intraday,weekly,monthly,levels,expiry,status,lastUpdate,tab,chartView,selLevel}=state;
+  const maxPain=computeMaxPain(chain);
+  const pcr=computePCR(chain);
+  const paSignals=detectPatterns(intraday);
+  const confluence=getConfluence(paSignals,chain,intraday,spot,maxPain,pcr,levels);
+  const nearbyLevels=levels.filter(l=>Math.abs(l.price-spot)<300);
+  const resistanceStrike=chain.length?chain.reduce((a,r)=>r.ce_oi>a.ce_oi?r:a,chain[0]).strike:0;
+  const supportStrike=chain.length?chain.reduce((a,r)=>r.pe_oi>a.pe_oi?r:a,chain[0]).strike:0;
+  const orb=intraday.length?{high:intraday[0].high,low:intraday[0].low}:null;
+  const lastC=intraday.length?intraday[intraday.length-1]:null;
+  const pcrColor=pcr>1.2?"#00e676":pcr<0.8?"#ff5252":"#ffd740";
+  const spotClass=lastC?(lastC.bullish?"spot-green":"spot-red"):"spot-gray";
+  const statusClass=status==="ok"?"status-ok":status==="loading"?"status-loading":"status-err";
+
+  let html='';
+
+  // ── HEADER ──
+  html+=`<div class="hdr">
+    <div class="hdr-left">
+      <div class="hdr-title">⚡ Live OI + PA + History</div>
+      <div class="hdr-sub">NIFTY · Dhan API · Real Data</div>
+      ${expiry?'<div class="hdr-expiry">Expiry: '+expiry+'</div>':""}
+    </div>
+    <div class="hdr-right">
+      <div class="spot-price ${spotClass}">${spot>0?toIN(spot):"—"}</div>
+      <div class="hdr-time">${lastUpdate?lastUpdate.toLocaleTimeString():"—"} &nbsp;
+        <button class="refresh-btn" onclick="fetchAll()">↻ Refresh</button>
+      </div>
+      <div class="status-dot ${statusClass}">${status==="ok"?"● LIVE":status==="loading"?"● Connecting…":"● Offline"}</div>
+    </div>
+  </div>`;
+
+  // ── STATUS BOX ──
+  if(status!=="ok"){
+    const isError=status.startsWith("error");
+    html+=`<div style="background:${isError?"#ff525210":"#5b9bff10"};border:1px solid ${isError?"#ff525240":"#5b9bff40"};border-radius:8px;padding:14px 16px;margin-bottom:12px;text-align:center">
+      <div style="font-size:12px;color:${isError?"#ff5252":"#5b9bff"};font-weight:700;margin-bottom:6px">${isError?"⚠ Cannot connect to dhan_server.py":"⟳ Connecting to local server…"}</div>
+      ${isError?`<div style="font-size:10px;color:#5a6a8a;margin-bottom:10px;line-height:1.7">Make sure dhan_server.py is running:<br><span style="color:#ffd740">cd C:\\dhan-mcp && python dhan_server.py</span></div>
+      <button onclick="fetchAll()" style="background:#5b9bff20;border:1px solid #5b9bff50;color:#5b9bff;border-radius:5px;padding:5px 16px;cursor:pointer;font-size:10px;font-weight:700;font-family:inherit">↻ Retry</button>`:""}
+    </div>`;
+  }
+
+  // ── CONFLUENCE BANNER ──
+  if(status==="ok"){
+    html+=`<div style="background:#0c1020;border:1px solid ${C[confluence.bias]}40;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">FULL CONFLUENCE (PA + OI + ORB + HISTORY)</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+            <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:8px;font-weight:700;background:${BG[confluence.bias]};color:${C[confluence.bias]};border:1px solid ${C[confluence.bias]}40;letter-spacing:1px">${confluence.bias}</span>
+            <span style="font-size:14px;font-weight:700;color:${C[confluence.bias]}">${confluence.strength}% conviction</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:16px">
+          <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:#00e676">${confluence.bull}</div><div style="font-size:7px;color:#3a4a6a">BULL pts</div></div>
+          <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:#ff5252">${confluence.bear}</div><div style="font-size:7px;color:#3a4a6a">BEAR pts</div></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;height:4px;background:#0f1525;border-radius:2px;overflow:hidden">
+        <div style="width:${confluence.strength}%;height:100%;background:linear-gradient(90deg,${C[confluence.bias]}60,${C[confluence.bias]});border-radius:2px;transition:width 0.8s"></div>
+      </div>
+      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px">
+        ${confluence.reasons.map(r=>`<span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:7px;font-weight:700;background:${r.side==="BULL"?BG.BULLISH:BG.BEARISH};color:${r.side==="BULL"?C.BULLISH:C.BEARISH};border:1px solid ${r.side==="BULL"?C.BULLISH:C.BEARISH}40;letter-spacing:1px">${r.text}</span>`).join("")}
+      </div>
+    </div>`;
+  }
+
+  // ── TABS ──
+  const tabs=[["dashboard","📊 Dashboard"],["history","🏛 Price Memory"],["chart","🕯 Charts"],["oi","📈 OI Chain"],["pa","🔍 PA Signals"]];
+  html+=`<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto">`;
+  tabs.forEach(([k,l])=>{
+    const a=tab===k;
+    html+=`<button onclick="setTab('${k}')" style="padding:6px 14px;border-radius:5px;border:1px solid ${a?"#5b9bff":"#151d30"};background:${a?"#5b9bff15":"transparent"};color:${a?"#5b9bff":"#3a4a6a"};font-size:9px;font-weight:700;cursor:pointer;letter-spacing:1px;white-space:nowrap;flex-shrink:0;font-family:inherit">${l}</button>`;
+  });
+  html+=`</div>`;
+
+  // ── TAB CONTENT ──
+  if(tab==="dashboard")html+=renderDashboard(spot,chain,intraday,levels,orb,maxPain,pcr,pcrColor,resistanceStrike,supportStrike,nearbyLevels);
+  else if(tab==="history")html+=renderHistory(levels,selLevel);
+  else if(tab==="chart")html+=renderCharts(intraday,weekly,monthly,orb,spot,levels,chartView);
+  else if(tab==="oi")html+=renderOIChain(chain,expiry,spot,resistanceStrike,supportStrike,maxPain);
+  else if(tab==="pa")html+=renderPA(paSignals);
+
+  html+=`<div style="text-align:center;font-size:7px;color:#151d30;margin-top:16px">Live data via dhan_server.py on localhost:5000 · Refreshes every 30s</div>`;
+  document.getElementById("app").innerHTML=html;
+}
+
+function setTab(t){state.tab=t;render();}
+function setChartView(v){state.chartView=v;render();}
+function toggleLevel(price){
+  if(state.selLevel&&state.selLevel.price===price)state.selLevel=null;
+  else state.selLevel=state.levels.find(l=>l.price===price)||null;
+  render();
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — DASHBOARD TAB
+// ─────────────────────────────────────────────────────────────
+function renderDashboard(spot,chain,intraday,levels,orb,maxPain,pcr,pcrColor,resistanceStrike,supportStrike,nearbyLevels){
+  let h='';
+  // Nearby historical levels warning
+  if(nearbyLevels.length>0){
+    h+=`<div style="background:#0c1020;border:1px solid #ffd74030;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">⚠ NEARBY HISTORICAL LEVELS (${nearbyLevels.length} within 300pts)</div>`;
+    nearbyLevels.forEach((l,i)=>{
+      h+=`<div onclick="toggleLevel(${l.price});setTab('history')" style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:${i<nearbyLevels.length-1?"1px solid #0f1525":"none"};cursor:pointer;gap:8px">
+        <div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:2px">
+            <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:8px;font-weight:700;background:${BG[l.type]};color:${C[l.type]};border:1px solid ${C[l.type]}40">${l.type}</span>
+            <span style="font-size:11px;font-weight:700;color:#dce6f5">${toIN(l.price)}</span>
+            <span style="font-size:8px;color:#3a4a6a">${l.timesframe||""}</span>
+          </div>
+          <div style="font-size:9px;color:#5a6a8a">${l.touches} touches · ${l.label||""}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:10px;font-weight:700;color:${C[l.type]}">${l.strength}%</div>
+          <div style="width:60px;height:3px;background:#0f1525;border-radius:2px;margin-top:4px"><div style="width:${l.strength}%;height:100%;background:${C[l.type]};border-radius:2px"></div></div>
+        </div>
+      </div>`;
+    });
+    h+=`</div>`;
+  }
+
+  // Metric cards (2x2)
+  h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+    <div style="background:#0c1020;border:1px solid #5b9bff25;border-radius:8px;padding:10px 12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">PCR</div>
+      <div style="font-size:20px;font-weight:700;color:${pcrColor};letter-spacing:1px">${pcr||"—"}</div>
+      <div style="font-size:8px;color:${pcrColor};margin-top:2px">${pcr>1.2?"OVERSOLD":pcr<0.8?"OVERBOUGHT":"NEUTRAL"}</div>
+    </div>
+    <div style="background:#0c1020;border:1px solid #ffd74025;border-radius:8px;padding:10px 12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">Max Pain</div>
+      <div style="font-size:20px;font-weight:700;color:#ffd740;letter-spacing:1px">${maxPain?toIN(maxPain):"—"}</div>
+      <div style="font-size:8px;color:#3a4a6a;margin-top:2px">Gravity zone</div>
+    </div>
+    <div style="background:#0c1020;border:1px solid #ff525225;border-radius:8px;padding:10px 12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">CE Wall (R)</div>
+      <div style="font-size:20px;font-weight:700;color:#ff5252;letter-spacing:1px">${resistanceStrike?toIN(resistanceStrike):"—"}</div>
+    </div>
+    <div style="background:#0c1020;border:1px solid #00e67625;border-radius:8px;padding:10px 12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">PE Wall (S)</div>
+      <div style="font-size:20px;font-weight:700;color:#00e676;letter-spacing:1px">${supportStrike?toIN(supportStrike):"—"}</div>
+    </div>
+  </div>`;
+
+  // ORB box
+  if(orb){
+    const orbStatus=spot>orb.high?"▲ ABOVE ORB":spot<orb.low?"▼ BELOW ORB":"◆ INSIDE ORB";
+    const orbColor=spot>orb.high?"#00e676":spot<orb.low?"#ff5252":"#ffd740";
+    h+=`<div style="background:#0c1020;border:1px solid #5b9bff25;border-radius:8px;padding:10px 12px;margin-bottom:12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px">ORB Status (9:15 Candle)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+        <div><div style="font-size:8px;color:#00e676">HIGH</div><div style="font-size:16px;font-weight:700;color:#00e676">${Math.round(orb.high)}</div></div>
+        <div style="text-align:center">
+          <div style="font-size:16px;font-weight:700;color:#5b9bff">${Math.round(spot)}</div>
+          <div style="font-size:8px;margin-top:2px;color:${orbColor}">${orbStatus}</div>
+        </div>
+        <div style="text-align:right"><div style="font-size:8px;color:#ff5252">LOW</div><div style="font-size:16px;font-weight:700;color:#ff5252">${Math.round(orb.low)}</div></div>
+      </div>
+    </div>`;
+  }
+
+  // Intraday chart
+  h+=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">Intraday Chart + All Levels</div>
+    <div style="height:180px">${renderCandleSVG(intraday,orb,spot,levels,180)}</div>
+  </div>`;
+  return h;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — HISTORY TAB
+// ─────────────────────────────────────────────────────────────
+function renderHistory(levels,selLevel){
+  let h=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">Auto-Detected S/R Levels from 3 Years of NIFTY Data</div>`;
+  if(!levels.length){
+    h+=`<div style="color:#3a4a6a;font-size:10px;text-align:center;padding:20px">No levels loaded — start dhan_server.py</div>`;
+  }
+  levels.sort((a,b)=>b.price-a.price).forEach(l=>{
+    const isSel=selLevel&&selLevel.price===l.price;
+    h+=`<div onclick="toggleLevel(${l.price})" style="padding:10px 12px;border-radius:7px;cursor:pointer;border:1px solid ${isSel?C[l.type]:"#151d30"};background:${isSel?BG[l.type]:"#0a0e1a"};margin-bottom:6px;transition:all 0.2s">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:8px;font-weight:700;background:${BG[l.type]};color:${C[l.type]};border:1px solid ${C[l.type]}40">${l.type}</span>
+          <span style="font-size:13px;font-weight:700;color:${C[l.type]}">${toIN(l.price)}</span>
+          <span style="font-size:8px;color:#3a4a6a">${l.timesframe||""}</span>
+          <span style="font-size:8px;color:#3a4a6a">${l.touches} touches</span>
+        </div>
+        <div style="font-size:10px;font-weight:700;color:${C[l.type]}">${l.strength}%</div>
+      </div>
+      <div style="margin-top:6px;height:3px;background:#0f1525;border-radius:2px"><div style="width:${l.strength}%;height:100%;background:${C[l.type]};border-radius:2px"></div></div>`;
+    if(isSel){
+      h+=`<div style="margin-top:10px;padding-top:10px;border-top:1px solid #151d30">
+        <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;margin-bottom:6px">DATES TOUCHED</div>
+        <div style="display:flex;flex-wrap:wrap;gap:5px">
+          ${(l.dates||[]).map(d=>`<span style="font-size:8px;padding:2px 8px;border-radius:3px;background:#5b9bff15;color:#5b9bff;border:1px solid #5b9bff30">${d}</span>`).join("")}
+        </div>
+        <div style="display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:6px;margin-top:10px;margin-bottom:6px;background:${l.type==="SUPPORT"?BG.BULLISH:BG.BEARISH};border:1px solid ${l.type==="SUPPORT"?C.BULLISH:C.BEARISH}25">
+          <div style="width:7px;height:7px;border-radius:50%;background:${l.type==="SUPPORT"?C.BULLISH:C.BEARISH};flex-shrink:0;margin-top:3px"></div>
+          <div style="font-size:9px;color:#8a9ab5">${l.type==="SUPPORT"?"Held as support "+l.touches+"× — if spot approaches with bullish PA + PE OI building → high conviction long.":"Rejected "+l.touches+"× — if spot approaches from below with bearish PA + CE OI spiking → hedge/short setup."}</div>
+        </div>
+      </div>`;
+    }
+    h+=`</div>`;
+  });
+  h+=`</div>`;
+  return h;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — CHARTS TAB
+// ─────────────────────────────────────────────────────────────
+function renderCharts(intraday,weekly,monthly,orb,spot,levels,chartView){
+  let h=`<div style="display:flex;gap:6px;margin-bottom:10px">`;
+  [["intraday","15-Min Today"],["weekly","Weekly"],["monthly","Monthly"]].forEach(([k,l])=>{
+    const a=chartView===k;
+    h+=`<button onclick="setChartView('${k}')" style="padding:6px 14px;border-radius:5px;border:1px solid ${a?"#5b9bff":"#151d30"};background:${a?"#5b9bff15":"transparent"};color:${a?"#5b9bff":"#3a4a6a"};font-size:9px;font-weight:700;cursor:pointer;letter-spacing:1px;white-space:nowrap;font-family:inherit">${l}</button>`;
+  });
+  h+=`</div>`;
+
+  const chartTitle=chartView==="intraday"?"Intraday 15-Min Candles — S/R levels overlaid":chartView==="weekly"?"Weekly Chart — Last 52 Weeks":"Monthly Chart — Last 3 Years";
+  const candles=chartView==="intraday"?intraday:chartView==="weekly"?weekly:monthly;
+  const chartOrb=chartView==="intraday"?orb:null;
+
+  h+=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">${chartTitle}</div>
+    <div style="height:210px">${renderCandleSVG(candles,chartOrb,spot,levels,210)}</div>
+  </div>`;
+
+  // OI change bars for intraday
+  if(chartView==="intraday"&&intraday.length>0){
+    h+=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+      <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">OI Change per Candle</div>
+      <div style="display:flex;align-items:flex-end;gap:2px;height:60px">`;
+    const maxOI=Math.max(...intraday.map(c=>Math.max(Math.abs(c.oi_ce_chg||0),Math.abs(c.oi_pe_chg||0),1)));
+    intraday.forEach(c=>{
+      const ceH=Math.round(Math.abs(c.oi_ce_chg||0)/maxOI*50)||1;
+      const peH=Math.round(Math.abs(c.oi_pe_chg||0)/maxOI*50)||1;
+      h+=`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px">
+        <div style="width:100%;height:${ceH}px;background:${(c.oi_ce_chg||0)>0?"#ff525255":"#00e67655"};border-radius:1px"></div>
+        <div style="width:100%;height:${peH}px;background:${(c.oi_pe_chg||0)>0?"#00e67655":"#ff525255"};border-radius:1px"></div>
+      </div>`;
+    });
+    h+=`</div>
+      <div style="display:flex;justify-content:center;gap:16px;margin-top:8px;font-size:7px;color:#3a4a6a">
+        <span><span style="display:inline-block;width:8px;height:8px;background:#ff525255;border-radius:2px;margin-right:4px;vertical-align:middle"></span>CE OI</span>
+        <span><span style="display:inline-block;width:8px;height:8px;background:#00e67655;border-radius:2px;margin-right:4px;vertical-align:middle"></span>PE OI</span>
+      </div>
+    </div>`;
+  }
+  return h;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — OI CHAIN TAB
+// ─────────────────────────────────────────────────────────────
+function renderOIChain(chain,expiry,spot,resistanceStrike,supportStrike,maxPain){
+  let h=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">Live Option Chain — Expiry: ${expiry}</div>`;
+  if(!chain.length){
+    h+=`<div style="color:#3a4a6a;font-size:10px;text-align:center;padding:20px">No data — start dhan_server.py</div>`;
+  }else{
+    h+=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">
+      <thead><tr>`;
+    ["CE OI","ΔOI","CE LTP","STRIKE","PE LTP","ΔOI","PE OI"].forEach(th=>{
+      h+=`<th style="padding:5px 6px;font-size:7px;color:#2a3a5a;text-transform:uppercase;letter-spacing:1px;text-align:center;border-bottom:1px solid #151d30">${th}</th>`;
+    });
+    h+=`</tr></thead><tbody>`;
+    chain.forEach(row=>{
+      const isATM=Math.abs(row.strike-spot)<60;
+      const isR=row.strike===resistanceStrike,isS=row.strike===supportStrike,isMP=row.strike===maxPain;
+      const sc=isATM?"#5b9bff":isR?"#ff5252":isS?"#00e676":isMP?"#ffd740":"#3a4a6a";
+      let label="";
+      if(isATM)label='<span style="font-size:7px;margin-left:2px;color:#5b9bff">ATM</span>';
+      else if(isR)label='<span style="font-size:7px;margin-left:2px;color:#ff5252">R</span>';
+      else if(isS)label='<span style="font-size:7px;margin-left:2px;color:#00e676">S</span>';
+      else if(isMP)label='<span style="font-size:7px;margin-left:2px;color:#ffd740">MP</span>';
+      h+=`<tr style="background:${isATM?"#5b9bff08":"transparent"};border-bottom:1px solid #0f1525">
+        <td style="padding:4px 6px;font-size:9px;text-align:center;color:#ff8a80">${fmt(row.ce_oi)}</td>
+        <td style="padding:4px 6px;font-size:8px;text-align:center;color:${row.ce_chg>0?"#ff5252":"#00e676"}">${row.ce_chg>0?"+":""}${fmt(row.ce_chg)}</td>
+        <td style="padding:4px 6px;font-size:9px;text-align:center">${row.ce_ltp||"—"}</td>
+        <td style="padding:4px 6px;font-size:10px;text-align:center;font-weight:700;color:${sc};border-left:1px solid #151d30;border-right:1px solid #151d30">${row.strike}${label}</td>
+        <td style="padding:4px 6px;font-size:9px;text-align:center">${row.pe_ltp||"—"}</td>
+        <td style="padding:4px 6px;font-size:8px;text-align:center;color:${row.pe_chg>0?"#00e676":"#ff5252"}">${row.pe_chg>0?"+":""}${fmt(row.pe_chg)}</td>
+        <td style="padding:4px 6px;font-size:9px;text-align:center;color:#80e27e">${fmt(row.pe_oi)}</td>
+      </tr>`;
+    });
+    h+=`</tbody></table></div>`;
+  }
+  h+=`</div>`;
+  return h;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// RENDER — PA SIGNALS TAB
+// ─────────────────────────────────────────────────────────────
+function renderPA(paSignals){
+  let h=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">Detected Patterns (Last 15-Min Candle)</div>`;
+  paSignals.forEach(s=>{
+    h+=`<div style="display:flex;align-items:flex-start;gap:8px;padding:7px 10px;border-radius:6px;margin-bottom:6px;background:${BG[s.type]};border:1px solid ${C[s.type]}25">
+      <div style="width:7px;height:7px;border-radius:50%;background:${C[s.type]};flex-shrink:0;margin-top:3px"></div>
+      <div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:2px">
+          <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:8px;font-weight:700;background:${BG[s.type]};color:${C[s.type]};border:1px solid ${C[s.type]}40">${s.type}</span>
+          <span style="font-size:10px;font-weight:700;color:#dce6f5">${s.name}</span>
+        </div>
+        <div style="font-size:9px;color:#5a6a8a">${s.desc}</div>
+      </div>
+    </div>`;
+  });
+  h+=`</div>`;
+
+  // Confluence rules table
+  h+=`<div style="background:#0c1020;border:1px solid #151d30;border-radius:8px;padding:12px 14px;margin-bottom:12px">
+    <div style="font-size:8px;color:#3a4a6a;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #0f1525">PA + OI + History Confluence Rules</div>`;
+  const rules=[
+    {pa:"Hammer at historical support",oi:"PE OI +ve change",hist:"3rd+ touch of level",action:"High conviction LONG",type:"BULLISH"},
+    {pa:"Shooting star at resistance",oi:"CE OI +ve change",hist:"2nd+ touch",action:"High conviction SHORT/HEDGE",type:"BEARISH"},
+    {pa:"Bullish engulfing above ORB High",oi:"CE OI unwinding",hist:"Above prior breakout zone",action:"Momentum LONG",type:"BULLISH"},
+    {pa:"Bearish engulfing below ORB Low",oi:"PE OI unwinding",hist:"Resistance-turned-support fail",action:"Momentum SHORT",type:"BEARISH"},
+    {pa:"Doji near max pain",oi:"PCR ≈ 1.0",hist:"Between S and R walls",action:"Avoid — no edge",type:"NEUTRAL"},
+  ];
+  rules.forEach(r=>{
+    h+=`<div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:7px 10px;border-radius:6px;margin-bottom:8px;background:${BG[r.type]};border:1px solid ${C[r.type]}25">
+      <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:8px;font-weight:700;background:${BG[r.type]};color:${C[r.type]};border:1px solid ${C[r.type]}40;letter-spacing:1px">${r.action}</span>
+      <div style="font-size:8px;color:#5a6a8a;line-height:1.7">
+        <span style="color:#dce6f5">PA:</span> ${r.pa} &nbsp;·&nbsp;
+        <span style="color:#dce6f5">OI:</span> ${r.oi} &nbsp;·&nbsp;
+        <span style="color:#dce6f5">History:</span> ${r.hist}
+      </div>
+    </div>`;
+  });
+  h+=`</div>`;
+  return h;
+}
+</script>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// INIT — Start the app
+// ─────────────────────────────────────────────────────────────
+fetchAll();
+startAutoRefresh();
+</script>
+
+
+</body>
+</html>
